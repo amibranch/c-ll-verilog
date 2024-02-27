@@ -29,6 +29,7 @@ llvm::Module *module;
 llvm::Function *function;
 llvm::BasicBlock *basic_block;
 llvm::IRBuilder<> *builder;
+llvm::LLVMContext basic_context;
 
 // Environment: stack of symbol tables. It is actually implemented as a list
 // to facilitate the traversal of symbol tables.
@@ -164,12 +165,13 @@ Declaration:
 		llvm::GlobalValue::ExternalLinkage,
 		nullptr,
 		symbol->getName());
-		// Symbol in local scope
-		else if (symbol_table->getScope() == SymbolTable::ScopeLocal)
+	// Symbol in local scope
+	else if (symbol_table->getScope() == SymbolTable::ScopeLocal)
 		symbol->lladdress = builder->CreateAlloca(symbol->type->lltype,
 		nullptr, Symbol::getTemp());
-		// Insert in symbol table
-		symbol_table->addSymbol(symbol);
+
+	// Insert in symbol table
+	symbol_table->addSymbol(symbol);
 }
 	| FunctionDeclaration TokenOpenCurly
 {
@@ -180,7 +182,7 @@ Declaration:
 	function = llvm::cast<llvm::Function>($1->lladdress);
 	// Create entry basic block
 	basic_block = llvm::BasicBlock::Create(
-	llvm::getGlobalContext(),
+	basic_context,
 	Symbol::getBasicBlock(),
 	function);
 	builder->SetInsertPoint(basic_block);
@@ -240,7 +242,7 @@ FunctionDeclaration:
 		false);
 	// Insert function
 	symbol->lladdress = module->getOrInsertFunction($2,
-	function_type);
+	function_type).getCallee();
 }
 FormalArguments:
 {
@@ -288,27 +290,27 @@ Type:
 	TokenBool
 	{
 	$$ = new Type(Type::KindBool);
-	$$->lltype = llvm::Type::getInt1Ty(llvm::getGlobalContext());
+	$$->lltype = llvm::Type::getInt1Ty(basic_context);
 	}
 	| TokenShort
 	{
 	$$ = new Type(Type::KindShort);
-	$$->lltype = llvm::Type::getInt16Ty(llvm::getGlobalContext());
+	$$->lltype = llvm::Type::getInt16Ty(basic_context);
 	}
 	| TokenInt
 	{
 	$$ = new Type(Type::KindInt);
-	$$->lltype = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+	$$->lltype = llvm::Type::getInt32Ty(basic_context);
 	}
 	| TokenFloat
 	{
 	$$ = new Type(Type::KindFloat);
-	$$->lltype = llvm::Type::getFloatTy(llvm::getGlobalContext());
+	$$->lltype = llvm::Type::getFloatTy(basic_context);
 }
 	| TokenVoid
 	{
 	$$ = new Type(Type::KindVoid);
-	$$->lltype = llvm::Type::getVoidTy(llvm::getGlobalContext());
+	$$->lltype = llvm::Type::getVoidTy(basic_context);
 	}
 	| TokenStruct TokenOpenCurly
 	{
@@ -327,7 +329,7 @@ Declarations TokenCloseCurly
 	SymbolTable *symbol_table = environment.back();
 	std::vector<llvm::Type *> lltypes;
 	symbol_table->getLLVMTypes(lltypes);
-	$$->lltype = llvm::StructType::create(llvm::getGlobalContext(), lltypes);
+	$$->lltype = llvm::StructType::create(basic_context, lltypes);
 	// Pop symbol table from environment
 	environment.pop_back();
 }
@@ -367,7 +369,7 @@ Statement:
 	| LValue TokenEqual Expression TokenSemicolon
 	{
 		llvm::Value *lladdress = $1.llindices->size() > 1 ?
-		builder->CreateGEP($1.lladdress, *$1.llindices,
+		builder->CreateGEP($1.type->lltype, $1.lladdress, *$1.llindices,
 		Symbol::getTemp()) :
 		$1.lladdress;
 		builder->CreateStore($3, lladdress);
@@ -397,7 +399,7 @@ Statement:
 		$<if_statement>$.then_basic_block = $1.then_basic_block;
 		$<if_statement>$.else_basic_block = $1.else_basic_block;
 		$<if_statement>$.end_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		// Emit unconditional branch to 'end' basic block
@@ -418,15 +420,15 @@ Statement:
 	{
 		// Create 'cond', 'body', and 'end' basic blocks
 		$<while_statement>$.cond_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<while_statement>$.body_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<while_statement>$.end_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		// Emit unconditional branch
@@ -458,11 +460,11 @@ IfStatement:
 		{
 		// Create 'if' and 'else' basic blocks, assume 'end' is same as 'else'.
 		$<if_statement>$.then_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<if_statement>$.else_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<if_statement>$.end_basic_block = $<if_statement>$.else_basic_block;
@@ -484,14 +486,14 @@ Expression:
 	LValue
 	{
 		llvm::Value *lladdress = $1.llindices->size() > 1 ?
-		builder->CreateGEP($1.lladdress, *$1.llindices,
+		builder->CreateGEP($1.type->lltype, $1.lladdress, *$1.llindices,
 		Symbol::getTemp()) :
 		$1.lladdress;
-		$$ = builder->CreateLoad(lladdress, Symbol::getTemp());
+		$$ = builder->CreateLoad($1.type->lltype, lladdress, Symbol::getTemp());
 	}
 	| TokenNumber
 	{
-		llvm::Type *lltype = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+		llvm::Type *lltype = llvm::Type::getInt32Ty(basic_context);
 		$$ = llvm::ConstantInt::get(lltype, $1);
 	}
 	| TokenMult Expression
@@ -503,11 +505,11 @@ Expression:
 			exit(1);
 		}
 		// Emit load
-		$$ = builder->CreateLoad($2, Symbol::getTemp());
+		$$ = builder->CreateLoad($2->getType(), $2, Symbol::getTemp());
 	}
 	| TokenMinus Expression
 	{
-		llvm::Type *lltype = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+		llvm::Type *lltype = llvm::Type::getInt32Ty(basic_context);
 		llvm::Value *llvalue = llvm::ConstantInt::get(lltype, 0);
 		$$ = builder->CreateBinOp(llvm::Instruction::Sub, llvalue, $2, Symbol::getTemp());
 	}
@@ -585,11 +587,11 @@ Expression:
 		$<logical>$.lhs_basic_block = basic_block;
 		// Create RHS and end basic blocks
 		$<logical>$.rhs_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<logical>$.end_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		// Emit conditional branch
@@ -609,7 +611,7 @@ Expression:
 		builder->SetInsertPoint(basic_block);
 		// Emit phi instruction
 		llvm::PHINode *phi = builder->CreatePHI(
-		llvm::IntegerType::getInt1Ty(llvm::getGlobalContext()),
+		llvm::IntegerType::getInt1Ty(basic_context),
 		2, Symbol::getTemp());
 		phi->addIncoming($1, $<logical>3.lhs_basic_block);
 		phi->addIncoming($4, $<logical>3.rhs_basic_block);
@@ -621,11 +623,11 @@ Expression:
 		$<logical>$.lhs_basic_block = basic_block;
 		// Create RHS and end basic blocks
 		$<logical>$.rhs_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		$<logical>$.end_basic_block = llvm::BasicBlock::Create(
-		llvm::getGlobalContext(),
+		basic_context,
 		Symbol::getBasicBlock(),
 		function);
 		// Emit conditional branch
@@ -645,7 +647,7 @@ Expression:
 		builder->SetInsertPoint(basic_block);
 		// Emit phi instruction
 		llvm::PHINode *phi = builder->CreatePHI(
-		llvm::IntegerType::getInt1Ty(llvm::getGlobalContext()),
+		llvm::IntegerType::getInt1Ty(basic_context),
 		2, Symbol::getTemp());
 		phi->addIncoming($1, $<logical>3.lhs_basic_block);
 		phi->addIncoming($4, $<logical>3.rhs_basic_block);
@@ -663,7 +665,7 @@ Expression:
 			exit(1);
 		}
 		// Invoke
-		$$ = builder->CreateCall(symbol->lladdress,
+		$$ = builder->CreateCall(((llvm::Function *)symbol->lladdress)->getFunctionType(), symbol->lladdress,
 		*$3,
 		symbol->type->rettype->getKind() == Type::KindVoid ?
 		"" : Symbol::getTemp());
@@ -711,7 +713,7 @@ LValue:
 	$$.lladdress = symbol->lladdress;
 	$$.llindices = new std::vector<llvm::Value *>();
 	// Add initial index set to 0
-	llvm::Type *lltype = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+	llvm::Type *lltype = llvm::Type::getInt32Ty(basic_context);
 	llvm::Value *llindex = llvm::ConstantInt::get(lltype, 0);
 	$$.llindices->push_back(llindex);
 	}
@@ -746,7 +748,7 @@ LValue:
 		exit(1);
 	}
 	// Add index
-	llvm::Type *lltype = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+	llvm::Type *lltype = llvm::Type::getInt32Ty(basic_context);
 	llvm::Value *llindex = llvm::ConstantInt::get(lltype, symbol->index);
 	$$.llindices = $1.llindices;
 	$$.llindices->push_back(llindex);
@@ -772,7 +774,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 	// LLVM context, builder, and module
-	llvm::LLVMContext &context = llvm::getGlobalContext();
+	llvm::LLVMContext context;
 	builder = new llvm::IRBuilder<>(context);
 	module = new llvm::Module("TestModule", context);
 	// Push global symbol table to environment
@@ -784,7 +786,7 @@ int main(int argc, char **argv)
 		yyparse();
 	} while (!feof(yyin));
 	// Dump module
-	module->dump();
+	module->print(llvm::errs(), nullptr);
 return 0;
 }
 
